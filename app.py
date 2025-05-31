@@ -10,8 +10,8 @@ app = Flask(__name__)
 # Allow requests from any origin for development. Be more specific in production.
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# Create a directory for downloads in /tmp (Render يسمح فقط بالكتابة في /tmp)
-DOWNLOAD_FOLDER = "/tmp/video_downloads"
+# Create a directory for downloads if it doesn't exist
+DOWNLOAD_FOLDER = "/home/ubuntu/video_downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
@@ -19,12 +19,13 @@ app.config["DOWNLOAD_FOLDER"] = DOWNLOAD_FOLDER
 
 # --- Helper Functions --- #
 
+import platform
+
 def get_yt_dlp_path():
-    # في بيئة Render (Linux)، yt-dlp يُنصب عبر pip ويصبح في PATH
-    return "yt-dlp"
+    return r"C:\Users\alaqe\anaconda3\Scripts\yt-dlp.exe"
 
 def is_valid_url(url):
-    # Basic check for YouTube or Twitter/X URLs
+    # Basic check for YouTube or Twitter URLs
     return re.match(r"^(https?://)?(www\.)?(youtube\.com|youtu\.be|twitter\.com|x\.com)/.+", url)
 
 def sanitize_filename(name):
@@ -33,14 +34,13 @@ def sanitize_filename(name):
     # Replace spaces with underscores
     name = re.sub(r'\s+', '_', name)
     # Limit length
-    return name[:100]  # Limit filename length
+    return name[:100] # Limit filename length
 
 # --- API Endpoints --- #
 
 @app.route("/")
 def hello_world():
     return "Video Downloader Backend is running!"
-
 @app.route("/api/video-info", methods=["POST"])
 def get_video_info():
     data = request.get_json()
@@ -72,23 +72,35 @@ def get_video_info():
         uploader = video_data.get("uploader", "N/A")
         original_url = video_data.get("original_url", url)
 
-        # --- استخراج الصيغ المتوفرة ---
+        # --- استخراج الصيغ الأصلية (Progressive) (فيديو + صوت فقط) ---
         formats = []
         for f in video_data.get("formats", []):
             fmt_id = f.get("format_id", "")
             vcodec = f.get("vcodec", "none")
             acodec = f.get("acodec", "none")
-            url_f = f.get("url")  # رابط مباشر للصيغة
+            url_f = f.get("url")  # هذا هو الرابط المباشر للصيغة (قد يحتاج إلى رؤوس معينة لتحميله)
 
-            # نعرض جميع الصيغ التي تحتوي فيديو (vcodec != "none")
-            if vcodec != "none" and url_f and (f.get("format_note") or f.get("height")):
+            # شروط اختيار الصيغ الأصلية المباشرة:
+            # 1) أن تكون صيغة progressive، أي vcodec != "none" و acodec != "none".
+            # 2) أن لا يحتوي format_id على “+” (كي نتأكد أنها ليست صيغة بحاجة إلى دمج خارجي).
+            # 3) أن تكون لها ملاحظة تنسيق أو ارتفاع لنظهر للمستخدم وصفًا واضحًا.
+            if (
+                vcodec != "none"
+                and acodec != "none"
+                and "+" not in fmt_id
+                and url_f
+                and (f.get("format_note") or f.get("height"))
+            ):
+                # بالإضافة للحقول القديمة، نضيف:
+                #   - download_url: رابط التنزيل المباشر
+                #   - http_headers: أي رؤوس HTTP يجب تزويدها عند تنزيل هذا الرابط
                 formats.append({
                     "format_id": fmt_id,
                     "resolution": f.get("format_note", f.get("height")),
                     "height": f.get("height"),
                     "ext": f.get("ext"),
                     "filesize": f.get("filesize") or f.get("filesize_approx"),
-                    "has_audio": (acodec != "none"),
+                    "has_audio": True,
                     "download_url": url_f,
                     "http_headers": f.get("http_headers", {})
                 })
@@ -166,7 +178,9 @@ def download_video():
     safe_title = sanitize_filename(title)
     output_template = os.path.join(specific_download_path, f"{safe_title}.%(ext)s")
 
-    # دمج الصيغة المختارة مع أفضل صوت (bestaudio) تلقائيًا
+    # --- التغيير الأساسي هنا: دمج الصيغة المختارة + أفضل صوت ---
+    # إذا كانت الصيغة المختارة تحتوي فقط على فيديو (بدون صوت)، فسوف يضيف yt-dlp تلقائيًا أفضل مسار صوت متاح (bestaudio).
+    # كما نضيف خيار --merge-output-format لدمج الملفات بصيغة MP4 إن لزم الأمر.
     merged_format = f"{format_id}+bestaudio"
     command = [
         yt_dlp_path,
@@ -189,6 +203,7 @@ def download_video():
 
         filename = downloaded_files[0]
         # Return a URL or identifier that the frontend can use to fetch the file
+        # Using a separate endpoint to serve the file is safer
         return jsonify({"download_url": f"/api/serve/{download_id}/{filename}"})
 
     except subprocess.TimeoutExpired:
@@ -223,10 +238,10 @@ def download_subtitle():
 
     command = [
         yt_dlp_path,
-        "--skip-download",  # Only download subtitles
+        "--skip-download", # Only download subtitles
         "--write-subs" if not is_auto else "--write-auto-subs",
         "--sub-langs", lang,
-        "--sub-format", "vtt",  # Prefer vtt format
+        "--sub-format", "vtt", # Prefer vtt format
         "-o", output_template,
         "--no-warnings",
         "--no-playlist",
@@ -240,7 +255,7 @@ def download_subtitle():
         if not downloaded_files:
             # Check stderr for specific messages if no file is found
             if f"No subtitles for language {lang}" in result.stderr:
-                return jsonify({"error": f"No subtitles available for language: {lang}"}), 404
+                 return jsonify({"error": f"No subtitles available for language: {lang}"}), 404
             return jsonify({"error": "Subtitle download failed, no file found."}), 500
 
         filename = downloaded_files[0]
@@ -273,8 +288,5 @@ def serve_file(download_id, filename):
         return jsonify({"error": "Could not serve file."}), 500
 
 if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Starting Flask server on 0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get("PORT", 5000))  # Render يضبط PORT تلقائيًا
+    app.run(host="0.0.0.0", port=port)
