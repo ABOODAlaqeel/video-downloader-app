@@ -7,7 +7,7 @@ import re
 import uuid
 import urllib.parse
 from googletrans import Translator  # مكتبة الترجمة المجانية
-import whisper  # استخدام مكتبة Whisper برمجيًّا بدل استدعاء الـ CLI
+import whisper  # مكتبة Whisper
 
 app = Flask(__name__)
 CORS(app)
@@ -21,9 +21,8 @@ app.config["DOWNLOAD_FOLDER"] = DOWNLOAD_FOLDER
 # مُترجم Google Translate 
 translator = Translator()
 
-# تحميل نموذج Whisper مرة واحدة عند بدء التطبيق لتحسين الأداء
-# يفضّل تحميله هنا وليس داخل الدالة نفسها كلّ مرة
-whisper_model = whisper.load_model("tiny")
+# سنحمّل نموذج Whisper بشكل lazy (أوّل حاجة فقط عند الطلب)
+whisper_model = None
 
 
 # --- دوال مساعدة --- #
@@ -42,7 +41,6 @@ def sanitize_filename(name):
     name = re.sub(r'[\\/*?"<>|]', "", name)
     name = re.sub(r'\s+', '_', name)
     return name[:100]
-
 
 def parse_vtt_and_translate(vtt_content: str, target_lang: str) -> str:
     """
@@ -467,9 +465,19 @@ def generate_translation():
         app.logger.error(f"Error downloading audio: {e}", exc_info=True)
         return jsonify({"error": f"Unexpected error during audio download: {e}"}), 500
 
-    # 2. استخدام نموذج Whisper برمجيًّا لإنشاء ملف VTT
+    # 2. تحميل نموذج Whisper بشكل lazy (أول طلب)
+    global whisper_model
+    if whisper_model is None:
+        try:
+            whisper_model = whisper.load_model("tiny")
+            # إذا أردت دقّة أعلى على حساب استهلاك أكثر، يمكنك استخدام "base" أو "small"
+            # لكن تأكد من حدود الذاكرة في Render إذا اخترت "small"
+        except Exception as e:
+            app.logger.error(f"Failed to load Whisper model: {e}", exc_info=True)
+            return jsonify({"error": f"Could not load transcription model: {e}"}), 500
+
+    # 3. استخدم النموذج للتفريغ الزمني
     try:
-        # عملية التفريغ (transcription) مع استخراج تقسيم زمني
         result = whisper_model.transcribe(audio_output, verbose=False, word_timestamps=False)
 
         # بناء محتوى WebVTT يدويًا
@@ -496,10 +504,10 @@ def generate_translation():
             f.write("\n".join(vtt_lines))
 
     except Exception as e:
-        app.logger.error(f"Error running whisper model: {e}", exc_info=True)
+        app.logger.error(f"Error running whisper transcription: {e}", exc_info=True)
         return jsonify({"error": f"Whisper transcription failed: {e}"}), 500
 
-    # 3. قراءة الـ VTT الأصلي ثم ترجمته
+    # 4. قراءة الـ VTT الأصلي ثم ترجمته
     try:
         with open(orig_vtt_path, "r", encoding="utf-8") as f:
             vtt_content = f.read()
@@ -508,7 +516,7 @@ def generate_translation():
         app.logger.error(f"Error reading/translating VTT: {e}", exc_info=True)
         return jsonify({"error": f"Failed to translate VTT: {e}"}), 500
 
-    # 4. كتابة الملف المترجم باسم جديد
+    # 5. كتابة الملف المترجم باسم جديد
     translated_filename = f"{safe_title}_to_{target_lang}.vtt"
     translated_filepath = os.path.join(specific_download_path, translated_filename)
     try:
