@@ -23,7 +23,7 @@ translator = Translator()
 
 # تحميل نموذج Whisper مرة واحدة عند بدء التطبيق لتحسين الأداء
 # يفضّل تحميله هنا وليس داخل الدالة نفسها كلّ مرة
-whisper_model = whisper.load_model("small")
+whisper_model = whisper.load_model("tiny")
 
 
 # --- دوال مساعدة --- #
