@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
 import subprocess
@@ -20,7 +20,7 @@ app.config["DOWNLOAD_FOLDER"] = DOWNLOAD_FOLDER
 # --- Helper Functions --- #
 
 def get_yt_dlp_path():
-    # في بيئة Render (Linux)، yt-dlp يُنصب عبر pip ويصبح في PATH
+    # في بيئة Render (Linux)، yt-dlp يُنصّب عبر pip ويصبح في PATH
     return "yt-dlp"
 
 def is_valid_url(url):
@@ -82,9 +82,7 @@ def get_video_info():
 
             # نعرض جميع الصيغ التي تحتوي فيديو (vcodec != "none")
             if vcodec != "none" and url_f and (f.get("format_note") or f.get("height")):
-                # حجم الملف إن وُجد (bytes) – نحصل عليه من yt-dlp عبر حقلي filesize أو filesize_approx
                 filesize = f.get("filesize") or f.get("filesize_approx")
-                # نحدد ما إذا كانت الصيغة تحتوي صوتًا أم لا
                 has_audio = (acodec != "none")
 
                 formats.append({
@@ -193,7 +191,7 @@ def download_video():
             return jsonify({"error": "Download failed, no file found."}), 500
 
         filename = downloaded_files[0]
-        # Return a URL or identifier that the frontend can use to fetch the file
+        # Return the file path so the client can fetch it
         return jsonify({"download_url": f"/api/serve/{download_id}/{filename}"})
 
     except subprocess.TimeoutExpired:
@@ -265,14 +263,14 @@ def download_subtitle():
 def serve_file(download_id, filename):
     directory = os.path.join(app.config['DOWNLOAD_FOLDER'], download_id)
     try:
-        # Ensure the path is safe
-        safe_path = os.path.abspath(os.path.join(directory, filename))
-        if not safe_path.startswith(os.path.abspath(directory)):
-            return jsonify({"error": "Invalid path"}), 400
+        full_path = os.path.join(directory, filename)
+        # تأكد من أن الملف موجود
+        if not os.path.isfile(full_path):
+            return jsonify({"error": "File not found."}), 404
 
-        return send_from_directory(directory, filename, as_attachment=True)
-    except FileNotFoundError:
-        return jsonify({"error": "File not found."}), 404
+        # استخدم send_file لإرسال الملف كمرفق
+        return send_file(full_path, as_attachment=True)
+
     except Exception as e:
         app.logger.error(f"Error serving file {filename} from {download_id}: {e}", exc_info=True)
         return jsonify({"error": "Could not serve file."}), 500
