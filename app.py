@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
 import subprocess
@@ -20,7 +20,7 @@ app.config["DOWNLOAD_FOLDER"] = DOWNLOAD_FOLDER
 # --- Helper Functions --- #
 
 def get_yt_dlp_path():
-    # في بيئة Render (Linux)، yt-dlp يُنصّب عبر pip ويصبح في PATH
+    # في بيئة Render (Linux)، yt-dlp يُنصب عبر pip ويصبح في PATH
     return "yt-dlp"
 
 def is_valid_url(url):
@@ -82,16 +82,13 @@ def get_video_info():
 
             # نعرض جميع الصيغ التي تحتوي فيديو (vcodec != "none")
             if vcodec != "none" and url_f and (f.get("format_note") or f.get("height")):
-                filesize = f.get("filesize") or f.get("filesize_approx")
-                has_audio = (acodec != "none")
-
                 formats.append({
                     "format_id": fmt_id,
                     "resolution": f.get("format_note", f.get("height")),
                     "height": f.get("height"),
                     "ext": f.get("ext"),
-                    "filesize": filesize,
-                    "has_audio": has_audio,
+                    "filesize": f.get("filesize") or f.get("filesize_approx"),
+                    "has_audio": (acodec != "none"),
                     "download_url": url_f,
                     "http_headers": f.get("http_headers", {})
                 })
@@ -191,7 +188,7 @@ def download_video():
             return jsonify({"error": "Download failed, no file found."}), 500
 
         filename = downloaded_files[0]
-        # Return the file path so the client can fetch it
+        # Return a URL or identifier that the frontend can use to fetch the file
         return jsonify({"download_url": f"/api/serve/{download_id}/{filename}"})
 
     except subprocess.TimeoutExpired:
@@ -263,14 +260,14 @@ def download_subtitle():
 def serve_file(download_id, filename):
     directory = os.path.join(app.config['DOWNLOAD_FOLDER'], download_id)
     try:
-        full_path = os.path.join(directory, filename)
-        # تأكد من أن الملف موجود
-        if not os.path.isfile(full_path):
-            return jsonify({"error": "File not found."}), 404
+        # Ensure the path is safe
+        safe_path = os.path.abspath(os.path.join(directory, filename))
+        if not safe_path.startswith(os.path.abspath(directory)):
+            return jsonify({"error": "Invalid path"}), 400
 
-        # استخدم send_file لإرسال الملف كمرفق
-        return send_file(full_path, as_attachment=True)
-
+        return send_from_directory(directory, filename, as_attachment=True)
+    except FileNotFoundError:
+        return jsonify({"error": "File not found."}), 404
     except Exception as e:
         app.logger.error(f"Error serving file {filename} from {download_id}: {e}", exc_info=True)
         return jsonify({"error": "Could not serve file."}), 500
