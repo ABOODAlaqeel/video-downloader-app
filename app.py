@@ -19,13 +19,13 @@ if not os.path.exists(DOWNLOAD_FOLDER):
 app.config["DOWNLOAD_FOLDER"] = DOWNLOAD_FOLDER
 
 # --- YouTube Data API Key ---
-# ضع مفتاحك هنا أو كمتغير بيئي: os.environ.get("YOUTUBE_API_KEY")
+# يمكنك استبدال المفتاح هنا أو وضعه كمتغير بيئي في Render
 YOUTUBE_API_KEY = "AIzaSyAn2ullYW1sX6Na3do1jUntncu--COqHsY"
 
 # --- Helper Functions --- #
 
 def get_yt_dlp_path():
-    # في بيئة Render (Linux)، yt-dlp يُنصب عبر pip ويصبح في PATH
+    # في بيئة Render (Linux)، yt-dlp يُنصّب عبر pip ويصبح في PATH
     return "yt-dlp"
 
 def is_valid_url(url):
@@ -41,9 +41,6 @@ def extract_youtube_video_id(url):
     """
     تحاول استخراج معرف الفيديو من روابط YouTube أو youtu.be
     """
-    # أمثلة الروابط:
-    #  https://www.youtube.com/watch?v=VIDEO_ID
-    #  https://youtu.be/VIDEO_ID
     patterns = [
         r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
         r"youtu\.be\/([0-9A-Za-z_-]{11})"
@@ -98,16 +95,14 @@ def get_video_info():
     if video_id:
         meta, err = fetch_metadata_via_youtube_api(video_id)
         if err:
-            # إذا فشل استدعاء الـ API، نصعد الخطأ في الـ JSON
             return jsonify({"error": err}), 500
         video_meta = meta
         original_url = f"https://www.youtube.com/watch?v={video_id}"
     else:
-        original_url = url  # إذا لم يكن YouTube، نستخدم الرابط الأصلي كما هو
+        original_url = url
 
     yt_dlp_path = get_yt_dlp_path()
 
-    # نستخدم yt-dlp لاستخراج الصيغ. نحاول بدون كوكيز أولاً.
     command = [
         yt_dlp_path,
         "--dump-json",
@@ -120,7 +115,7 @@ def get_video_info():
         result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=60)
         video_data = json.loads(result.stdout)
 
-        # في حال لم نقم باستدعاء YouTube Data API أو فشل، نعتمد على yt-dlp للحصول على البيانات
+        # إذا فشلنا في الحصول على البيانات من API سابقًا، نعتمد على yt-dlp
         if not video_meta["title"]:
             video_meta["title"] = video_data.get("title", "N/A")
         if not video_meta["thumbnail"]:
@@ -136,7 +131,6 @@ def get_video_info():
             acodec = f.get("acodec", "none")
             url_f = f.get("url")
 
-            # نعرض كل صيغة تحتوي فيديو
             if vcodec != "none" and url_f and (f.get("format_note") or f.get("height")):
                 formats.append({
                     "format_id": fmt_id,
@@ -149,7 +143,6 @@ def get_video_info():
                     "http_headers": f.get("http_headers", {})
                 })
 
-        # نرتب الصيغ بحسب الدقة تنازليًا
         formats.sort(key=lambda x: x.get("height", 0), reverse=True)
 
         # --- استخراج الترجمات (subtitles) ---
@@ -187,11 +180,9 @@ def get_video_info():
 
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
-        # في حال طلب YouTube تسجيل دخول (Bot check)، نخبر الواجهة بذلك
         if "Sign in to confirm you’re not a bot" in stderr:
             return jsonify({
-                "error": "YouTube requires login (كوكيز) للوصول إلى هذا الفيديو. "
-                         "API Key لا يكفي لتنزيل الفيديو محميًّا."
+                "error": "YouTube requires login (كوكيز) للوصول إلى هذا الفيديو. API Key لا يكفي لتنزيل فيديو محمي."
             }), 403
         return jsonify({"error": f"yt-dlp error: {stderr}"}), 500
     except subprocess.TimeoutExpired:
@@ -220,7 +211,6 @@ def download_video():
     safe_title = sanitize_filename(title)
     output_template = os.path.join(specific_download_path, f"{safe_title}.%(ext)s")
 
-    # نجرب تنزيل الصيغة المحددة بدون كوكيز أولاً
     merged_format = f"{format_id}+bestaudio"
     command = [
         yt_dlp_path,
@@ -245,7 +235,7 @@ def download_video():
         stderr = e.stderr or ""
         if "Sign in to confirm you’re not a bot" in stderr:
             return jsonify({
-                "error": "YouTube يتطلب تسجيل دخول (كوكيز) لتنزيل هذا الفيديو. API Key لا يكفي لتنزيل فيديو محميّ."
+                "error": "YouTube يتطلب تسجيل دخول (كوكيز) لتنزيل هذا الفيديو. API Key لا يكفي لتنزيل فيديو محمي."
             }), 403
         return jsonify({"error": f"yt-dlp download error: {stderr}"}), 500
     except subprocess.TimeoutExpired:
