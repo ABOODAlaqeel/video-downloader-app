@@ -82,13 +82,18 @@ def get_video_info():
 
             # نعرض جميع الصيغ التي تحتوي فيديو (vcodec != "none")
             if vcodec != "none" and url_f and (f.get("format_note") or f.get("height")):
+                # حجم الملف إن وُجد (bytes) – نحصل عليه من yt-dlp عبر حقلي filesize أو filesize_approx
+                filesize = f.get("filesize") or f.get("filesize_approx")
+                # نحدد ما إذا كانت الصيغة تحتوي صوتًا أم لا
+                has_audio = (acodec != "none")
+
                 formats.append({
                     "format_id": fmt_id,
                     "resolution": f.get("format_note", f.get("height")),
                     "height": f.get("height"),
                     "ext": f.get("ext"),
-                    "filesize": f.get("filesize") or f.get("filesize_approx"),
-                    "has_audio": (acodec != "none"),
+                    "filesize": filesize,
+                    "has_audio": has_audio,
                     "download_url": url_f,
                     "http_headers": f.get("http_headers", {})
                 })
