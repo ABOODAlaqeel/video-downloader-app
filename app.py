@@ -7,6 +7,7 @@ import re
 import uuid
 import urllib.parse
 from googletrans import Translator  # مكتبة الترجمة المجانية
+import whisper  # استخدام مكتبة Whisper برمجيًّا بدل استدعاء الـ CLI
 
 app = Flask(__name__)
 CORS(app)
@@ -19,6 +20,10 @@ app.config["DOWNLOAD_FOLDER"] = DOWNLOAD_FOLDER
 
 # مُترجم Google Translate 
 translator = Translator()
+
+# تحميل نموذج Whisper مرة واحدة عند بدء التطبيق لتحسين الأداء
+# يفضّل تحميله هنا وليس داخل الدالة نفسها كلّ مرة
+whisper_model = whisper.load_model("small")
 
 
 # --- دوال مساعدة --- #
@@ -47,8 +52,8 @@ def parse_vtt_and_translate(vtt_content: str, target_lang: str) -> str:
     lines = vtt_content.splitlines()
     output_lines = []
     for line in lines:
-        if "-->" in line or line.strip() == "" or line.strip().isdigit():
-            # سطر توقيت أو رقم كتلة أو سطر فارغ: نحتفظ به كما هو
+        if "-->" in line or line.strip() == "" or line.strip().isdigit() or line.strip().upper() == "WEBVTT":
+            # سطر توقيت أو رقم كتلة أو سطر فارغ أو رأس VTT: نحتفظ به كما هو
             output_lines.append(line)
         else:
             # سطر نص: نترجمه
@@ -66,6 +71,8 @@ def parse_vtt_and_translate(vtt_content: str, target_lang: str) -> str:
 @app.route("/")
 def hello_world():
     return "Video Downloader Backend is running!"
+
+
 @app.route("/api/video-info", methods=["POST"])
 def get_video_info():
     data = request.get_json()
@@ -158,7 +165,6 @@ def get_video_info():
                     "ext": vtt_cap.get("ext")
                 }
 
-        # ←ــــــــــــ هنا قمنا بنقل بناء response_data إلى خارج حلقة الـ for الخاصة بالترجمات الآلية
         response_data = {
             "title": title,
             "thumbnail": thumbnail,
@@ -414,7 +420,7 @@ def generate_translation():
     مسار جديد لتوليد ترجمة عربية (أو لغة أخرى) لفيديو تويتر أو يوتيوب.
     الخطوات:
       1. نحمل الصوت فقط (best audio) من الفيديو.
-      2. نستعمل whisper CLI لاستخلاص ملف VTT (باللغة الأصلية).
+      2. نستعمل نموذج Whisper برمجيًا لاستخلاص ملف VTT (باللغة الأصلية).
       3. نقرأ ملف VTT الأصلي، نترجمه إلى العربية (target_lang) عبر parse_vtt_and_translate.
       4. نرسل رابط تحميل الملف المترجم.
     استقبال:
@@ -440,7 +446,7 @@ def generate_translation():
     safe_title = sanitize_filename(title)
     audio_output = os.path.join(specific_download_path, f"{safe_title}.m4a")
 
-    # 1. نحمل مسار الصوت فقط (bestaudio)
+    # 1. تحميل مسار الصوت فقط (bestaudio)
     download_audio_cmd = [
         yt_dlp_path,
         "-f", "bestaudio",
@@ -461,42 +467,48 @@ def generate_translation():
         app.logger.error(f"Error downloading audio: {e}", exc_info=True)
         return jsonify({"error": f"Unexpected error during audio download: {e}"}), 500
 
-    # 2. نستدعي whisper CLI لإنتاج VTT تلقائي بناءً على الصوت
-    #    نفترض أن الأمر "whisper" مثبت في PATH.
-    whisper_cmd = [
-        "whisper",
-        audio_output,
-        "--model", "small",
-        "--output_format", "vtt",
-        "--output_dir", specific_download_path
-    ]
+    # 2. استخدام نموذج Whisper برمجيًّا لإنشاء ملف VTT
     try:
-        subprocess.run(whisper_cmd, capture_output=True, text=True, check=True, timeout=600)
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Whisper transcription timed out."}), 504
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr or ""
-        return jsonify({"error": f"Whisper error: {stderr}"}), 500
+        # عملية التفريغ (transcription) مع استخراج تقسيم زمني
+        result = whisper_model.transcribe(audio_output, verbose=False, word_timestamps=False)
+
+        # بناء محتوى WebVTT يدويًا
+        vtt_lines = ["WEBVTT\n"]
+        for i, segment in enumerate(result["segments"], start=1):
+            start = segment["start"]
+            end = segment["end"]
+            text = segment["text"].strip()
+
+            def format_timestamp(sec: float):
+                hours = int(sec // 3600)
+                minutes = int((sec % 3600) // 60)
+                seconds = sec % 60
+                return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+            vtt_lines.append(str(i))
+            vtt_lines.append(f"{format_timestamp(start)} --> {format_timestamp(end)}")
+            vtt_lines.append(text)
+            vtt_lines.append("")  # سطر فارغ بين الكتل
+
+        orig_vtt_filename = f"{safe_title}.orig.vtt"
+        orig_vtt_path = os.path.join(specific_download_path, orig_vtt_filename)
+        with open(orig_vtt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(vtt_lines))
+
     except Exception as e:
-        app.logger.error(f"Error running whisper: {e}", exc_info=True)
-        return jsonify({"error": f"Unexpected error during transcription: {e}"}), 500
+        app.logger.error(f"Error running whisper model: {e}", exc_info=True)
+        return jsonify({"error": f"Whisper transcription failed: {e}"}), 500
 
-    # بعد انتهاء whisper، يجب أن يكون ملف VTT باسم "<safe_title>.vtt" داخل المجلد
-    vtt_filename = f"{safe_title}.vtt"
-    vtt_filepath = os.path.join(specific_download_path, vtt_filename)
-    if not os.path.isfile(vtt_filepath):
-        return jsonify({"error": "Whisper VTT file not found."}), 500
-
-    # 3. نقرأ محتوى الـ VTT الأصلي ثم نترجمه
+    # 3. قراءة الـ VTT الأصلي ثم ترجمته
     try:
-        with open(vtt_filepath, "r", encoding="utf-8") as f:
+        with open(orig_vtt_path, "r", encoding="utf-8") as f:
             vtt_content = f.read()
         translated_vtt_content = parse_vtt_and_translate(vtt_content, target_lang)
     except Exception as e:
         app.logger.error(f"Error reading/translating VTT: {e}", exc_info=True)
         return jsonify({"error": f"Failed to translate VTT: {e}"}), 500
 
-    # 4. نكتب الملف المترجم باسم جديد
+    # 4. كتابة الملف المترجم باسم جديد
     translated_filename = f"{safe_title}_to_{target_lang}.vtt"
     translated_filepath = os.path.join(specific_download_path, translated_filename)
     try:

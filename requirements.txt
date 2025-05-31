@@ -18,3 +18,8 @@ yt-dlp
 
 # Translation
 googletrans==4.0.0-rc1
+
+
+
+# Whisper (آخر نسخة من GitHub)
+git+https://github.com/openai/whisper.git
